@@ -52,7 +52,7 @@
 	import 'tippy.js/dist/tippy.css';
 
 	import { executeToolServer, getBackendConfig, getModels, getVersion } from '$lib/apis';
-	import { getSessionUser, updateUserTimezone, userSignOut } from '$lib/apis/auths';
+	import { getSessionUser, updateUserTimezone, userSignOut, userSignIn } from '$lib/apis/auths';
 	import { getAllTags } from '$lib/apis/chats';
 	import { chatCompletion } from '$lib/apis/openai';
 	import { isTemporaryChatId } from '$lib/utils/chatId';
@@ -1274,7 +1274,14 @@
 			await WEBUI_NAME.set(backendConfig.name);
 
 			if ($config) {
-				await setupSocket($config.features?.enable_websocket ?? true);
+				if (!$config.features?.hermes_only) {
+					await setupSocket($config.features?.enable_websocket ?? true);
+				}
+				if ($config.features?.hermes_only && $config.features?.auth === false) {
+					const sessionUser = await userSignIn('', '');
+					localStorage.token = sessionUser.token;
+					await user.set(sessionUser);
+				}
 
 				if (localStorage.token) {
 					// Get Session User Info

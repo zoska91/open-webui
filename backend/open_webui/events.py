@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from open_webui.env import ENABLE_PLUGINS, VERSION
+from open_webui.utils.hermes_mode import HERMES_ONLY
 from open_webui.models.config import Config
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from open_webui.retrieval.web.utils import validate_url
@@ -1182,6 +1183,9 @@ async def publish_event(
     data: dict | None = None,
     message: str | None = None,
 ) -> None:
+    if HERMES_ONLY:
+        # Even auth/user events must not trigger saved AI functions or webhooks.
+        return
     app = getattr(request_or_app, 'app', request_or_app)
     request = request_or_app if hasattr(request_or_app, 'app') else None
     event_payload = build_event(

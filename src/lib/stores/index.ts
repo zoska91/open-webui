@@ -340,6 +340,7 @@ type Config = {
 	default_prompt_suggestions: PromptSuggestion[] | null;
 	default_prompt_suggestions_i18n?: Record<string, { suggestion_prompts: PromptSuggestion[] }>;
 	features: {
+		hermes_only?: boolean;
 		slim?: boolean;
 		auth: boolean;
 		auth_trusted_header: boolean;

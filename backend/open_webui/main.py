@@ -74,6 +74,7 @@ from open_webui.config import (
     seed_registered_defaults,
 )
 from open_webui.constants import ERROR_MESSAGES, TASKS
+from open_webui.utils.hermes_mode import HERMES_ONLY, HermesApplicationBoundary
 from open_webui.utils.recurrence import RecurrenceEvaluationTimeout
 from open_webui.env import (
     USE_SLIM,
@@ -147,6 +148,7 @@ from open_webui.models.messages import Messages
 from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.users import Users
 from open_webui.routers import (
+    hermes,
     analytics,
     audio,
     auths,
@@ -365,6 +367,16 @@ async def lifespan(app: FastAPI):
 
     await import_legacy_config_json()
     await seed_registered_defaults()
+    if HERMES_ONLY:
+        # No model loading, tool/plugin installation, AI scheduler, or event
+        # automations. Hermes owns the complete agent lifecycle.
+        app.state.redis = get_redis_client(async_mode=True)
+        app.state.startup_complete = True
+        yield
+        from open_webui.utils.session_pool import close_session
+
+        await close_session()
+        return
     await initialize_runtime_config(app)
     await migrate_legacy_webhook_config()
     await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
@@ -827,6 +839,9 @@ if ENABLE_COMPRESSION_MIDDLEWARE:
 # `open_webui.utils.asgi_middleware` for the rationale.
 app.add_middleware(AppHTTPMiddleware)
 
+if HERMES_ONLY:
+    app.add_middleware(HermesApplicationBoundary)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -837,50 +852,55 @@ app.add_middleware(
 )
 
 
-app.mount('/ws', socket_app)
+if not HERMES_ONLY:
+    app.mount('/ws', socket_app)
 
+app.include_router(hermes.router, prefix='/api/hermes', tags=['hermes'])
 
-app.include_router(ollama.router, prefix='/ollama', tags=['ollama'])
-app.include_router(openai.router, prefix='/openai', tags=['openai'])
-
-
-app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
-app.include_router(tasks.router, prefix='/api/v1/tasks', tags=['tasks'])
-app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
-
-app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
-app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
-
-app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
 
 app.include_router(auths.router, prefix='/api/v1/auths', tags=['auths'])
 app.include_router(users.router, prefix='/api/v1/users', tags=['users'])
 
+if not HERMES_ONLY:
+    app.include_router(ollama.router, prefix='/ollama', tags=['ollama'])
+    app.include_router(openai.router, prefix='/openai', tags=['openai'])
 
-app.include_router(channels.router, prefix='/api/v1/channels', tags=['channels'])
-app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
-app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
+
+    app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
+    app.include_router(tasks.router, prefix='/api/v1/tasks', tags=['tasks'])
+    app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
+
+    app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
+    app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
+
+    app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
 
 
-app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
-app.include_router(notifications.router, prefix='/api/v1/notifications', tags=['notifications'])
-app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
-app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
-app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
-app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
 
-app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
-app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
-app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
-app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
-app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
-app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
-if ENABLE_ADMIN_ANALYTICS:
-    app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
-app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
-app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
-app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
-app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
+    app.include_router(channels.router, prefix='/api/v1/channels', tags=['channels'])
+    app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
+    app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
+
+
+    app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
+    app.include_router(notifications.router, prefix='/api/v1/notifications', tags=['notifications'])
+    app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
+    app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
+    app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
+    app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
+
+    app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
+    app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
+    app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
+    app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
+    app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
+    app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
+    if ENABLE_ADMIN_ANALYTICS:
+        app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
+    app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
+    app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
+    app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
+    app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
@@ -2325,6 +2345,7 @@ async def get_app_config(request: Request):
             'auto_redirect': config.get('oauth.auto_redirect'),
         },
         'features': {
+            'hermes_only': HERMES_ONLY,
             'slim': USE_SLIM,
             # --- Public: required by login/signup page pre-auth ---
             'auth': WEBUI_AUTH,

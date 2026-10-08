@@ -41,6 +41,7 @@
 	} from '$lib/stores';
 
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
+	import HermesApplicationShell from '$lib/components/layout/HermesApplicationShell.svelte';
 	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
@@ -216,6 +217,14 @@
 			return;
 		}
 		if (!['user', 'admin'].includes($user?.role)) {
+			return;
+		}
+		if ($config?.features?.hermes_only) {
+			await setUserSettings();
+			if (!/^\/(hermes|home|modules)(\/|$)/.test($page.url.pathname)) {
+				await goto('/home', { replaceState: true });
+			}
+			loaded = true;
 			return;
 		}
 
@@ -422,6 +431,11 @@
 	};
 </script>
 
+{#if $config?.features?.hermes_only}
+	{#if $user && loaded}
+		<HermesApplicationShell><slot /></HermesApplicationShell>
+	{/if}
+{:else}
 <SettingsModal bind:show={$showSettings} />
 <ChangelogModal bind:show={$showChangelog} />
 
@@ -463,6 +477,7 @@
 			{/if}
 		</div>
 	</div>
+{/if}
 {/if}
 
 <style>
