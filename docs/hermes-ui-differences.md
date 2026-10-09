@@ -118,6 +118,9 @@ jest uruchomiony — poniżej znajduje się pełna lista ograniczeń naszego try
     konfigurację aplikacji, lecz nie znosi granicy HERMES_ONLY. Włączenie
     opcji AI w bazie OWUI nie uruchomi jego generowania ani nie ustawi
     modelu, narzędzi lub promptu Hermesa.
+    Wybrane zakładki ustawień AI odczytują zablokowane endpointy konfiguracji
+    (np. audio/obrazy/RAG) i mogą zgłaszać niedostępność/błąd. Widok pozostaje
+    oryginalny; konfigurację tych funkcji należy prowadzić w Hermesie.
 
 ## Dokładna granica API
 
