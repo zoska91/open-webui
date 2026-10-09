@@ -74,6 +74,7 @@ from open_webui.config import (
     seed_registered_defaults,
 )
 from open_webui.constants import ERROR_MESSAGES, TASKS
+from open_webui.utils.hermes_mode import HERMES_ONLY, HermesApplicationBoundary, AI_DISABLED_FEATURES
 from open_webui.utils.recurrence import RecurrenceEvaluationTimeout
 from open_webui.env import (
     USE_SLIM,
@@ -147,6 +148,7 @@ from open_webui.models.messages import Messages
 from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.users import Users
 from open_webui.routers import (
+    hermes,
     analytics,
     audio,
     auths,
@@ -365,6 +367,16 @@ async def lifespan(app: FastAPI):
 
     await import_legacy_config_json()
     await seed_registered_defaults()
+    if HERMES_ONLY:
+        # No model loading, tool/plugin installation, AI scheduler, or event
+        # automations. Hermes owns the complete agent lifecycle.
+        app.state.redis = get_redis_client(async_mode=True)
+        app.state.startup_complete = True
+        yield
+        from open_webui.utils.session_pool import close_session
+
+        await close_session()
+        return
     await initialize_runtime_config(app)
     await migrate_legacy_webhook_config()
     await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
@@ -827,6 +839,9 @@ if ENABLE_COMPRESSION_MIDDLEWARE:
 # `open_webui.utils.asgi_middleware` for the rationale.
 app.add_middleware(AppHTTPMiddleware)
 
+if HERMES_ONLY:
+    app.add_middleware(HermesApplicationBoundary)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -836,6 +851,8 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
+
+app.include_router(hermes.router, prefix='/api/hermes', tags=['hermes'])
 
 app.mount('/ws', socket_app)
 
@@ -897,6 +914,13 @@ if ENABLE_SCIM:
 @app.get('/api/models')
 @app.get('/api/v1/models')  # Experimental: Compatibility with OpenAI API
 async def get_models(request: Request, refresh: bool = False, user=Depends(get_verified_user)):
+    if HERMES_ONLY:
+        return {'data': [{
+            'id': 'hermes-agent', 'name': 'Hermes', 'object': 'model',
+            'owned_by': 'hermes', 'info': {'meta': {'capabilities': {
+                'vision': True, 'file_upload': True, 'usage': True,
+            }}},
+        }]}
     all_models = await get_all_models(request, refresh=refresh, user=user)
 
     # Filter out filter pipelines
@@ -945,6 +969,8 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
 
 @app.get('/api/models/base')
 async def get_base_models(request: Request, user=Depends(get_admin_user)):
+    if HERMES_ONLY:
+        return await get_models(request, user=user)
     models = await get_all_base_models(request, user=user)
     return {'data': models}
 
@@ -2325,6 +2351,7 @@ async def get_app_config(request: Request):
             'auto_redirect': config.get('oauth.auto_redirect'),
         },
         'features': {
+            'hermes_only': HERMES_ONLY,
             'slim': USE_SLIM,
             # --- Public: required by login/signup page pre-auth ---
             'auth': WEBUI_AUTH,
@@ -2388,10 +2415,11 @@ async def get_app_config(request: Request):
                 if user is not None
                 else {}
             ),
+            **({feature: False for feature in AI_DISABLED_FEATURES} if HERMES_ONLY else {}),
         },
         **(
             {
-                'default_models': config.get('ui.default_models'),
+                'default_models': 'hermes-agent' if HERMES_ONLY else config.get('ui.default_models'),
                 'default_pinned_models': config.get('ui.default_pinned_models'),
                 'default_prompt_suggestions': config.get('ui.prompt_suggestions'),
                 'default_prompt_suggestions_i18n': config.get('ui.prompt_suggestions_i18n'),

@@ -398,6 +398,11 @@
 
 		await tick();
 
+        if ($config?.features?.hermes_only) {
+            await fetch('/api/hermes/ui-sessions/sync', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.token } })
+                .then((response) => { if (!response.ok) throw new Error('Nie można wczytać listy rozmów Hermesa'); })
+                .catch((error) => toast.error(error.message));
+        }
 		loaded = true;
 	});
 

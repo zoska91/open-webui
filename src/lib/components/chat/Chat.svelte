@@ -84,7 +84,10 @@
 		updateChatById,
 		updateChatFolderIdById
 	} from '$lib/apis/chats';
-	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
+	import { NativeUiBridge, nativeUiContent, nativeUiHistory } from '$lib/apis/hermes/native-ui';
+    import type { ServerRequest } from '$lib/apis/hermes';
+    import RequestCard from '$lib/components/hermes/RequestCard.svelte';
+    import { generateOpenAIChatCompletion } from '$lib/apis/openai';
 	import { processUrl, processWebSearch } from '$lib/apis/retrieval';
 	import {
 		getAndUpdateUserLocation,
@@ -144,6 +147,97 @@
 	export let onDeleteEmbeddedChat: ((chatId: string) => void | Promise<void>) | null = null;
 	export let onEmbeddedChatTitle: ((chatId: string, title: string) => void | Promise<void>) | null =
 		null;
+
+    let nativeBridge: NativeUiBridge | null = null;
+    let nativeStoredId = '';
+    let nativeTargetChatId = '';
+    let nativeTargetResponseId = '';
+    let nativeSending = false;
+    let nativeConnected = false;
+    let hermesRequests: ServerRequest[] = [];
+    let hermesRequestModalOpen = false;
+    const ensureNativeBridge = () => {
+        if (!nativeBridge) nativeBridge = new NativeUiBridge({
+            connected: (value) => { nativeConnected = value; },
+            update: (value) => {
+                if ($chatId !== nativeTargetChatId) return;
+                const message = history.messages[nativeTargetResponseId];
+                if (!message) return;
+                const justFinished = !message.done && !value.running;
+                message.content = nativeUiContent(value);
+                message.done = !value.running;
+                if (value.error) message.error = { content: value.error };
+                history = { ...history };
+                void tick().then(() => { if (shouldAutoScrollResponse()) scrollToBottom(); });
+                if (!value.running) {
+                    void saveChatHandler(nativeTargetChatId, history).then(async () => {
+                        await refreshChatList(localStorage.token);
+                        if (justFinished && $chatId === nativeTargetChatId) await processNextInQueue(nativeTargetChatId);
+                    });
+                }
+            },
+            requests: (value) => {
+                hermesRequests = value;
+                hermesRequestModalOpen = value.length > 0;
+            },
+            identity: (stored, info) => {
+                nativeStoredId = stored;
+                if ($chatId && !$temporaryChatEnabled) {
+                    const fields: any = { hermes_session_id: stored };
+                    if (info.title && (!chat?.chat?.title || ['New Chat', 'Nowy czat'].includes(chat?.chat?.title))) {
+                        fields.title = info.title;
+                        chatTitle.set(info.title);
+                    }
+                    return updateChatById(localStorage.token, $chatId, fields).then((value) => { if (value) chat = value; });
+                }
+            },
+            restore: (result) => {
+                if (nativeSending || $chatId !== nativeTargetChatId) return;
+                history = nativeUiHistory(result.messages);
+                if (result.inflight && result.running) {
+                    let parent = history.currentId;
+                    if (result.inflight.user && history.messages[parent]?.content !== result.inflight.user) {
+                        const id = uuidv4();
+                        history.messages[id] = { id, parentId: parent, childrenIds: [], role: 'user', content: result.inflight.user, models: ['hermes-agent'], timestamp: Math.floor(Date.now()/1000) };
+                        if (parent) history.messages[parent].childrenIds.push(id);
+                        parent = id;
+                    }
+                    const id = uuidv4();
+                    history.messages[id] = { id, parentId: parent, childrenIds: [], role: 'assistant', content: result.inflight.assistant || '', done: false, model: 'hermes-agent', modelName: 'Hermes', timestamp: Math.floor(Date.now()/1000) };
+                    if (parent) history.messages[parent].childrenIds.push(id);
+                    history.currentId = id;
+                }
+                nativeTargetResponseId = history.currentId || '';
+                history = { ...history };
+                void saveChatHandler($chatId, history);
+            },
+        });
+        return nativeBridge;
+    };
+
+    const sendNativeMessage = async (_history, responseMessageId, _chatId, options) => {
+        const message = history.messages[responseMessageId];
+        const userMessage = _history.messages[message.parentId];
+        if (!_chatId) _chatId = await initChatHandler(history);
+        nativeTargetChatId = _chatId;
+        nativeTargetResponseId = responseMessageId;
+        try {
+            if (options.continueResponse || options.regenerationPrompt)
+                throw new Error('Kontynuacja i regeneracja z instrukcją nie są podłączone do natywnego protokołu Hermesa.');
+            nativeSending = true;
+            const ordinal = createMessagesList(_history, userMessage.id).filter((m) => m.role === 'user').length - 1;
+            await ensureNativeBridge().send(userMessage.content, nativeStoredId || chat?.chat?.hermes_session_id || '', userMessage.files || [], ordinal);
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            message.error = { content: detail };
+            message.done = true;
+            history = { ...history };
+            toast.error(detail);
+            await saveChatHandler(_chatId, history);
+        } finally {
+            nativeSending = false;
+        }
+    };
 
 	let loading = true;
 	$: chatContainerId = embedded ? 'note-chat-container' : 'chat-container';
@@ -1533,6 +1627,7 @@
 		);
 
 	const handleSocketConnect = async () => {
+        if ($config?.features?.hermes_only) return;
 		// Gate on $chatId, not chatIdProp: chats started from the home page keep an empty chatIdProp
 		if (!$chatId || $temporaryChatEnabled) {
 			return;
@@ -1542,7 +1637,7 @@
 			return;
 		}
 
-		const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
+		const pendingTaskIds = $config?.features?.hermes_only ? [] : await getTaskIdsByChatId(localStorage.token, $chatId)
 			.then((res) => res?.task_ids ?? [])
 			.catch(() => null);
 
@@ -1630,6 +1725,7 @@
 		init();
 
 		return () => {
+            nativeBridge?.close();
 			try {
 				clearTimeout(saveControlsTimer);
 				saveControls();
@@ -2014,6 +2110,13 @@
 
 	const initNewChat = async () => {
 		console.log('initNewChat');
+        nativeBridge?.close();
+        nativeBridge = null;
+        nativeStoredId = '';
+        nativeTargetChatId = '';
+        nativeTargetResponseId = '';
+        hermesRequests = [];
+        hermesRequestModalOpen = false;
 		resetWebSearchConfirmation();
 
 		// Mark the outgoing chat as read before resetting; in-place created chats
@@ -2350,6 +2453,11 @@
 				params = structuredClone(chatContent?.params ?? {});
 				delete params.note_id;
 				chatFiles = structuredClone(chatContent?.files ?? []);
+                if ($config?.features?.hermes_only && chatContent.hermes_session_id) {
+                    nativeTargetChatId = $chatId;
+                    await ensureNativeBridge().resume(chatContent.hermes_session_id);
+                }
+
 
 				// Load tasks from chat-level DB field
 				chatTasks = chat?.tasks ?? [];
@@ -2377,7 +2485,7 @@
 				// work (follow-ups, title gen) that shouldn't block the input.
 				const activeTaskIds = taskIds;
 				const currentMessage = history.currentId ? history.messages[history.currentId] : null;
-				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
+				const pendingTaskIds = $config?.features?.hermes_only ? [] : await getTaskIdsByChatId(localStorage.token, $chatId)
 					.then((res) => res?.task_ids ?? [])
 					.catch((error) => {
 						console.warn('[note-chat] getTaskIdsByChatId failed; continuing without tasks', {
@@ -2621,6 +2729,7 @@
 	};
 
 	const getChatEventEmitter = async (modelId: string, chatId: string = '') => {
+		if ($config?.features?.hermes_only) return null;
 		return setInterval(() => {
 			$socket?.emit('usage', {
 				action: 'chat',
@@ -3089,6 +3198,10 @@
 	};
 
 	const submitHandler = async (userPrompt, { _raw = false } = {}) => {
+		if ($config?.features?.hermes_only && selectedModelIds.length > 1) {
+			toast.error('Porównywanie wielu modeli nie jest podłączone. Rozmowę obsługuje jedna sesja Hermesa.');
+			return;
+		}
 		console.log('submitHandler', userPrompt, $chatId);
 
 		const _selectedModels = selectedModels.map((modelId) =>
@@ -3099,22 +3212,22 @@
 			selectedModels = _selectedModels;
 		}
 
-		if (String(userPrompt).trim() === '/compact') {
+		if (!$config?.features?.hermes_only && String(userPrompt).trim() === '/compact') {
 			clearCommandInput();
 			await handleManualCompact();
 			return;
 		}
-		if (String(userPrompt).trim() === '/status') {
+		if (!$config?.features?.hermes_only && String(userPrompt).trim() === '/status') {
 			clearCommandInput();
 			handleStatusCommand();
 			return;
 		}
-		if (String(userPrompt).trim() === '/fork') {
+		if (!$config?.features?.hermes_only && String(userPrompt).trim() === '/fork') {
 			clearCommandInput();
 			await handleForkChat();
 			return;
 		}
-		const modelCommandMatch = String(userPrompt)
+		const modelCommandMatch = $config?.features?.hermes_only ? null : String(userPrompt)
 			.trim()
 			.match(/^\/model(?:\s+([\s\S]+))?$/);
 		if (modelCommandMatch) {
@@ -3438,6 +3551,10 @@
 			continueResponse?: boolean;
 		} = {}
 	) => {
+        if ($config?.features?.hermes_only) {
+            await sendNativeMessage(_history, responseMessageId, _chatId, { regenerationPrompt, continueResponse });
+            return;
+        }
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
 
@@ -3751,6 +3868,11 @@
 	};
 
 	const stopResponse = async (processQueue = true) => {
+        if ($config?.features?.hermes_only && nativeBridge) {
+            await nativeBridge.interrupt();
+            return;
+        }
+
 		const responseMessage = history.currentId ? history.messages[history.currentId] : null;
 		const hasTaskIds = (taskIds?.length ?? 0) > 0;
 		const hasPendingAssistantResponse =
@@ -4002,7 +4124,8 @@
 					history: history,
 					messages: createMessagesList(history, history.currentId),
 					params: params,
-					files: chatFiles
+					files: chatFiles,
+					...($config?.features?.hermes_only && nativeStoredId ? { hermes_session_id: nativeStoredId } : {})
 				});
 			}
 		}
@@ -4169,7 +4292,18 @@
 	</title>
 </svelte:head>
 
-<audio id="audioElement" style="display: none;"></audio>
+<Modal bind:show={hermesRequestModalOpen} size="md">
+    <div class="p-4">
+        {#each hermesRequests as request (request.id)}
+            <RequestCard {request} connected={nativeConnected} onanswered={(id) => nativeBridge?.answered(id)} />
+        {/each}
+    </div>
+</Modal>
+{#if hermesRequests.length && !hermesRequestModalOpen}
+    <button class="fixed bottom-24 right-4 z-40 rounded-xl bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 px-4 py-2"
+        on:click={() => (hermesRequestModalOpen = true)}>Hermes wymaga odpowiedzi</button>
+{/if}
+<audio id="audioElement"  style="display: none;"></audio>
 
 {#if getChatVariablesForm(selectedModelIds, chatVariables, $models).conflicts.length > 0}
 	<Modal bind:show={showChatVariablesModal} size="md">
