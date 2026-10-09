@@ -1,6 +1,6 @@
 # Application modules
 
-The Svelte shell hosts complete React modules. Both the browser and installed PWA load the same
+The original Svelte application hosts complete React modules. Both the browser and installed PWA load the same
 build. The registry is application metadata only; importing the sidebar does not load React.
 
 ## Add a module
@@ -9,8 +9,8 @@ build. The registry is application metadata only; importing the sidebar does not
    `ApplicationModuleProps` from `src/lib/modules/types.ts`.
 2. Add one entry to `applicationModules` in `src/lib/modules/registry.ts`: `id`, `title`, `icon`,
    `path: '/modules/<id>'`, and a lazy `load: () => import('./<id>/YourModule')`.
-3. Use the existing `/modules/[moduleId]` route. No new sidebar or route implementation is needed.
-   The current built-in module is `dashboard`; `/home` opens the same component.
+3. Use the existing `/modules/[moduleId]` route. The current built-in module is `dashboard` at `/modules/dashboard`.
+   These additional routes are not replacements for the original sidebar; `/home` redirects to the original chat.
 4. Keep styles scoped to the module's root class. Use responsive layouts and the shell's `.dark`
    class. The host owns the React root and unmounts it when navigating away, so effects must return
    their normal cleanup functions.
@@ -42,7 +42,7 @@ preference, editable through the dashboard.
 
 Keep custom module code in `src/lib/modules/` and the adapter in `src/lib/components/modules/`.
 The central registry is the single integration point for navigation. When adopting upstream changes,
-review the shell integration and runtime authentication, then rebuild and check `/home` and a module
+review the module route integration and runtime authentication, then rebuild and check `/` and a module
 route at phone and desktop widths. Do not overwrite upstream files with an unreviewed script.
 
 A separate module package can later replace the local imports in the registry. Publishing a package

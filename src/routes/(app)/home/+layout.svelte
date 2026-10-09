@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
-	import { WEBUI_NAME, showSidebar, functions, mobile, config } from '$lib/stores';
+	import { WEBUI_NAME, showSidebar, functions, mobile } from '$lib/stores';
 	import { page } from '$app/stores';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Sidebar from '$lib/components/icons/Sidebar.svelte';
@@ -19,9 +19,6 @@
 	</title>
 </svelte:head>
 
-{#if $config?.features?.hermes_only}
-	<div class="h-full min-h-0 overflow-auto"><slot /></div>
-{:else}
 <div
 	class=" flex flex-col w-full h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
 		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
@@ -76,4 +73,3 @@
 		<slot />
 	</div>
 </div>
-{/if}

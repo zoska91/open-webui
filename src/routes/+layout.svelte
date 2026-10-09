@@ -1274,9 +1274,7 @@
 			await WEBUI_NAME.set(backendConfig.name);
 
 			if ($config) {
-				if (!$config.features?.hermes_only) {
-					await setupSocket($config.features?.enable_websocket ?? true);
-				}
+				await setupSocket($config.features?.enable_websocket ?? true);
 				if ($config.features?.hermes_only && $config.features?.auth === false) {
 					const sessionUser = await userSignIn('', '');
 					localStorage.token = sessionUser.token;

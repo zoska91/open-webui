@@ -186,3 +186,94 @@ describe('Hermes display projection', () => {
 		expect(clarifyAnswer([], '', true)).toBe('');
 	});
 });
+
+import { NativeUiBridge, nativeUiHistory, nativeUiContent } from './native-ui';
+import { Marked } from 'marked';
+import markedExtension from '../../utils/marked/extension';
+describe('Original UI with a native Hermes runtime', () => {
+    it('renders reasoning with the original Markdown details tokenizer', () => {
+        const parser = new Marked(markedExtension({}));
+        const content = nativeUiContent({text:'answer',reasoning:'thinking <script>',tools:'',running:false,error:''});
+        const tokens = parser.lexer(content);
+        expect(tokens[0].type).toBe('details');
+        expect(tokens[0].attributes.type).toBe('reasoning');
+        expect(tokens[0].attributes.done).toBe('true');
+        expect(content).not.toContain('<script>');
+    });
+    function setup(restoredMessages: any[] = []) {
+        const frames: any[] = [];
+        let activeSocket: EventTarget;
+        class Socket extends EventTarget {
+            static OPEN = 1;
+            readyState = 0;
+            constructor() {
+                super();
+                activeSocket = this;
+                queueMicrotask(() => { this.readyState = 1; this.dispatchEvent(new Event('open')); });
+            }
+            send(text: string) {
+                const request = JSON.parse(text);
+                frames.push(request);
+                const result = request.method === 'session.create'
+                    ? {session_id:'runtime-1', stored_session_id:'durable', messages:[], info:{}}
+                    : request.method === 'session.resume'
+                    ? {session_id:'runtime-2', session_key:'durable', messages:restoredMessages, info:{stored_session_id:'durable'}}
+                    : request.method === 'prompt.submit' ? {status:'streaming'} : {};
+                if (request.id) queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', {
+                    data: JSON.stringify({jsonrpc:'2.0', id:request.id, result})
+                })));
+            }
+            close() { this.readyState = 3; this.dispatchEvent(new Event('close')); }
+        }
+        vi.stubGlobal('WebSocket', Socket);
+        vi.stubGlobal('window', {location:{protocol:'https:',host:'app.test',origin:'https://app.test'}});
+        const identity = vi.fn(async () => {});
+        const connected = vi.fn();
+        const update = vi.fn();
+        const bridge = new NativeUiBridge({update,requests:vi.fn(),identity,restore:vi.fn(),connected});
+        return {bridge,frames,identity,connected,update,metadata:()=>activeSocket.dispatchEvent(new MessageEvent('message',{
+            data:JSON.stringify({jsonrpc:'2.0',method:'event',params:{type:'session.info',session_id:'runtime-2',seq:1,payload:{stored_session_id:'durable'}}})
+        }))};
+    }
+    it('sends exact user text without replaying UI prompts, history, tools or parameters', async () => {
+        const {bridge, frames, identity, connected} = setup();
+        const text = '\n  USER <input> with whitespace  \n';
+        await bridge.send(text,'',[],0);
+        expect(frames.filter((f) => f.method === 'session.create')[0].params).toEqual({source:'web',close_on_disconnect:false});
+        expect(frames.filter((f) => f.method === 'prompt.submit')).toHaveLength(1);
+        expect(frames.find((f) => f.method === 'prompt.submit').params).toEqual({session_id:'runtime-1',text});
+        expect(identity).toHaveBeenCalledWith('durable',{});
+        expect(connected).toHaveBeenCalledWith(true);
+        bridge.close();
+        expect(connected).toHaveBeenLastCalledWith(false);
+    });
+    it('does not erase restored answers when session metadata arrives after resume', async () => {
+        const {bridge,metadata,update} = setup([{role:'assistant',text:'saved answer',row_id:2}]);
+        await bridge.resume('durable');
+        metadata();
+        await Promise.resolve();
+        expect(update).not.toHaveBeenCalled();
+        bridge.close();
+    });
+    it('preserves cold-resume durable identity and prevents an unsupported history rewrite', async () => {
+        const {bridge, frames, identity} = setup([{role:'user',text:'existing',row_id:1}]);
+        await bridge.resume('durable');
+        expect(identity).toHaveBeenCalledWith('durable',{stored_session_id:'durable'});
+        await expect(bridge.send('replacement','durable',[],0)).rejects.toThrow('Edycja wcześniejszych');
+        expect(frames.some((f) => f.method === 'prompt.submit')).toBe(false);
+        bridge.close();
+    });
+    it('keeps hidden prompts out of the UI projection and retains tools as display data', () => {
+        const history = nativeUiHistory([
+            {role:'system',text:'hidden system'},
+            {role:'user',text:'hello',row_id:1},
+            {role:'assistant',text:'answer',row_id:2,reasoning:'reason'},
+            {role:'tool',name:'test',content:'tool result',row_id:3},
+            {role:'assistant',text:'hidden',display_kind:'hidden',row_id:4},
+        ]);
+        expect(Object.values(history.messages)).toHaveLength(2);
+        expect(history.messages[history.currentId!].content).toContain('tool result');
+        expect(JSON.stringify(history)).not.toContain('hidden system');
+        expect(history.messages['history-1'].childrenIds).toEqual(['history-2']);
+    });
+});

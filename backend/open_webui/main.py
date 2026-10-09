@@ -74,7 +74,7 @@ from open_webui.config import (
     seed_registered_defaults,
 )
 from open_webui.constants import ERROR_MESSAGES, TASKS
-from open_webui.utils.hermes_mode import HERMES_ONLY, HermesApplicationBoundary
+from open_webui.utils.hermes_mode import HERMES_ONLY, HermesApplicationBoundary, AI_DISABLED_FEATURES
 from open_webui.utils.recurrence import RecurrenceEvaluationTimeout
 from open_webui.env import (
     USE_SLIM,
@@ -852,55 +852,52 @@ app.add_middleware(
 )
 
 
-if not HERMES_ONLY:
-    app.mount('/ws', socket_app)
-
 app.include_router(hermes.router, prefix='/api/hermes', tags=['hermes'])
 
+app.mount('/ws', socket_app)
+
+
+app.include_router(ollama.router, prefix='/ollama', tags=['ollama'])
+app.include_router(openai.router, prefix='/openai', tags=['openai'])
+
+
+app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
+app.include_router(tasks.router, prefix='/api/v1/tasks', tags=['tasks'])
+app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
+
+app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
+app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
+
+app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
 
 app.include_router(auths.router, prefix='/api/v1/auths', tags=['auths'])
 app.include_router(users.router, prefix='/api/v1/users', tags=['users'])
 
-if not HERMES_ONLY:
-    app.include_router(ollama.router, prefix='/ollama', tags=['ollama'])
-    app.include_router(openai.router, prefix='/openai', tags=['openai'])
+
+app.include_router(channels.router, prefix='/api/v1/channels', tags=['channels'])
+app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
+app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
 
 
-    app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
-    app.include_router(tasks.router, prefix='/api/v1/tasks', tags=['tasks'])
-    app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
+app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
+app.include_router(notifications.router, prefix='/api/v1/notifications', tags=['notifications'])
+app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
+app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
+app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
+app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
 
-    app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
-    app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
-
-    app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
-
-
-
-    app.include_router(channels.router, prefix='/api/v1/channels', tags=['channels'])
-    app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
-    app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
-
-
-    app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
-    app.include_router(notifications.router, prefix='/api/v1/notifications', tags=['notifications'])
-    app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
-    app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
-    app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
-    app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
-
-    app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
-    app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
-    app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
-    app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
-    app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
-    app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
-    if ENABLE_ADMIN_ANALYTICS:
-        app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
-    app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
-    app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
-    app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
-    app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
+app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
+app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
+app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
+app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
+app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
+app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
+if ENABLE_ADMIN_ANALYTICS:
+    app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
+app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
+app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
+app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
+app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
@@ -917,6 +914,13 @@ if ENABLE_SCIM:
 @app.get('/api/models')
 @app.get('/api/v1/models')  # Experimental: Compatibility with OpenAI API
 async def get_models(request: Request, refresh: bool = False, user=Depends(get_verified_user)):
+    if HERMES_ONLY:
+        return {'data': [{
+            'id': 'hermes-agent', 'name': 'Hermes', 'object': 'model',
+            'owned_by': 'hermes', 'info': {'meta': {'capabilities': {
+                'vision': True, 'file_upload': True, 'usage': True,
+            }}},
+        }]}
     all_models = await get_all_models(request, refresh=refresh, user=user)
 
     # Filter out filter pipelines
@@ -965,6 +969,8 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
 
 @app.get('/api/models/base')
 async def get_base_models(request: Request, user=Depends(get_admin_user)):
+    if HERMES_ONLY:
+        return await get_models(request, user=user)
     models = await get_all_base_models(request, user=user)
     return {'data': models}
 
@@ -2409,10 +2415,11 @@ async def get_app_config(request: Request):
                 if user is not None
                 else {}
             ),
+            **({feature: False for feature in AI_DISABLED_FEATURES} if HERMES_ONLY else {}),
         },
         **(
             {
-                'default_models': config.get('ui.default_models'),
+                'default_models': 'hermes-agent' if HERMES_ONLY else config.get('ui.default_models'),
                 'default_pinned_models': config.get('ui.default_pinned_models'),
                 'default_prompt_suggestions': config.get('ui.prompt_suggestions'),
                 'default_prompt_suggestions_i18n': config.get('ui.prompt_suggestions_i18n'),

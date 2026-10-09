@@ -1,10 +1,5 @@
 <script lang="ts">
-	import ReactModuleHost from '$lib/components/modules/ReactModuleHost.svelte';
-	import { getApplicationModule } from '$lib/modules/registry';
-
-	const dashboard = getApplicationModule('dashboard');
+    import { onMount } from 'svelte';
+    import { goto } from '$app/navigation';
+    onMount(() => goto('/', { replaceState: true }));
 </script>
-
-{#if dashboard}
-	<ReactModuleHost module={dashboard} />
-{/if}

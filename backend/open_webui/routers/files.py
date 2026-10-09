@@ -41,6 +41,7 @@ from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.audio import transcribe
+from open_webui.utils.hermes_mode import HERMES_ONLY
 from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -288,6 +289,8 @@ async def upload_file(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    if HERMES_ONLY:
+        process = False
     result = await upload_file_handler(
         request,
         file=file,
@@ -299,6 +302,10 @@ async def upload_file(
         db=db,
     )
 
+    if HERMES_ONLY:
+        raw_id = result.get('id') if isinstance(result, dict) else result.id
+        await Files.update_file_data_by_id(raw_id, {'status': 'completed'}, db=db)
+        result = await Files.get_file_by_id(raw_id, db=db)
     if isinstance(result, dict):
         result_id = result.get('id')
         result_filename = result.get('filename')
@@ -580,7 +587,8 @@ async def delete_all_files(
     if result:
         try:
             await asyncio.to_thread(Storage.delete_all_files)
-            await ASYNC_VECTOR_DB_CLIENT.reset()
+            if not HERMES_ONLY:
+                await ASYNC_VECTOR_DB_CLIENT.reset()
         except Exception as e:
             log.exception(e)
             log.error('Error deleting files')
@@ -1030,9 +1038,10 @@ async def delete_file_by_id(
             await Knowledges.remove_file_from_knowledge_by_id(knowledge.id, id, db=db)
             # Clean KB embeddings (same logic as /knowledge/{id}/file/remove)
             try:
-                await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': id})
-                if file.hash:
-                    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'hash': file.hash})
+                if not HERMES_ONLY:
+                    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': id})
+                    if file.hash:
+                        await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'hash': file.hash})
             except Exception as e:
                 log.debug('KB embedding cleanup for %s: %s', knowledge.id, e)
 
@@ -1040,7 +1049,8 @@ async def delete_file_by_id(
         if result:
             try:
                 await asyncio.to_thread(Storage.delete_file, file.path)
-                await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=f'file-{id}')
+                if not HERMES_ONLY:
+                    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=f'file-{id}')
             except Exception as e:
                 log.exception(e)
                 log.error('Error deleting files')

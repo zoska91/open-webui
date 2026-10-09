@@ -53,23 +53,23 @@ class ApplicationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/api/chat/completions", "/api/v1/chat/completions", "/api/chat/completed",
             "/api/chat/actions/tool", "/api/embeddings", "/api/v1/embeddings",
             "/api/message", "/api/v1/messages", "/api/v1/messages/count_tokens",
-            "/api/models", "/api/v1/models", "/api/models/unload",
+            "/api/models", "/api/models/unload",
             "/openai/chat/completions", "/openai/responses", "/ollama/api/chat",
         ):
             calls, messages = await self.call_boundary(path)
             self.assertEqual(calls, [], path)
-            self.assertEqual(messages[0]["status"], 404, path)
+            self.assertEqual(messages[0]["status"], 403, path)
 
     async def test_tool_plugin_memory_and_automation_routes_are_closed(self):
         for path in (
             "/api/v1/functions", "/api/v1/pipelines/upload", "/api/v1/tools",
-            "/api/v1/skills", "/api/v1/memories", "/api/v1/retrieval",
+            "/api/v1/memories", "/api/v1/retrieval",
             "/api/v1/automations", "/api/tasks", "/api/v1/audio/speech",
             "/api/v1/images/generations", "/api/events/webhooks", "/oauth/test/login",
         ):
             calls, messages = await self.call_boundary(path)
             self.assertEqual(calls, [], path)
-            self.assertEqual(messages[0]["status"], 404, path)
+            self.assertEqual(messages[0]["status"], 403, path)
 
     async def test_ui_assets_bootstrap_identity_and_hermes_transport_remain_available(self):
         for path in (
@@ -83,11 +83,40 @@ class ApplicationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls, [path], path)
             self.assertEqual(messages, [], path)
 
+    async def test_original_ui_storage_and_metadata_endpoints_remain_available(self):
+        for path in (
+            "/api/v1/chats/", "/api/v1/folders/create", "/api/v1/notes/create",
+            "/api/v1/calendars/events", "/api/v1/channels/", "/api/v1/configs/",
+            "/api/v1/prompts/create", "/api/v1/skills/create", "/api/v1/files/",
+        ):
+            calls, messages = await self.call_boundary(path)
+            self.assertEqual(calls, [path], path)
+            self.assertEqual(messages, [], path)
+        for path in ("/api/models", "/api/v1/tools", "/api/v1/functions", "/api/v1/knowledge/list"):
+            calls, messages = await self.call_boundary(path, method="GET")
+            self.assertEqual(calls, [path], path)
+            self.assertEqual(messages, [], path)
+        calls, messages = await self.call_boundary("/ws/socket.io/", scope_type="websocket")
+        self.assertEqual(calls, ["/ws/socket.io/"])
+        self.assertEqual(messages, [])
+
+    async def test_ui_can_read_catalogs_but_cannot_load_or_execute_code(self):
+        for path in (
+            "/api/v1/functions/create", "/api/v1/functions/sync",
+            "/api/v1/tools/create", "/api/v1/knowledge/test/file/add",
+            "/api/v1/files/test/data/content/update",
+            "/api/v1/chats/test/compact", "/api/v1/chats/test/fork",
+            "/api/v1/chats/test/clone",
+        ):
+            calls, messages = await self.call_boundary(path)
+            self.assertEqual(calls, [], path)
+            self.assertEqual(messages[0]["status"], 403, path)
+
     async def test_only_native_hermes_websocket_reaches_downstream(self):
         calls, messages = await self.call_boundary("/api/hermes/ws", scope_type="websocket")
         self.assertEqual(calls, ["/api/hermes/ws"])
         self.assertEqual(messages, [])
-        for path in ("/ws/socket.io", "/api/v1/terminals/ws", "/api/hermes/status", "/any-socket"):
+        for path in ("/api/v1/terminals/ws", "/api/hermes/status", "/any-socket"):
             calls, messages = await self.call_boundary(path, scope_type="websocket")
             self.assertEqual(calls, [], path)
             self.assertEqual(messages, [{"type": "websocket.close", "code": 1008}])
@@ -96,7 +125,7 @@ class ApplicationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         for path in ("/api/configure", "/api/hermes-completions", "/api/v1/auths-plugins", "/api/v1/users-ai"):
             calls, messages = await self.call_boundary(path)
             self.assertEqual(calls, [], path)
-            self.assertEqual(messages[0]["status"], 404, path)
+            self.assertEqual(messages[0]["status"], 403, path)
 
 
 class BackgroundAgentBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -149,3 +178,46 @@ class BackgroundAgentBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RawAttachmentBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_actual_upload_stores_bytes_without_scheduling_ai_extraction(self):
+        handler = AsyncMock(return_value={"id": "test-file", "filename": "test.txt", "meta": {}})
+        files = SimpleNamespace(
+            update_file_data_by_id=AsyncMock(),
+            get_file_by_id=AsyncMock(return_value={"id": "test-file", "filename": "test.txt", "meta": {}}),
+        )
+        empty = lambda *args, **kwargs: None
+        namespace = {
+            "router": SimpleNamespace(post=lambda *args, **kwargs: lambda fn: fn),
+            "Depends": empty, "File": empty, "Form": empty, "Query": empty,
+            "get_verified_user": Mock(), "get_async_session": Mock(), "FileModelResponse": object,
+            "HERMES_ONLY": True, "upload_file_handler": handler, "Files": files,
+            "publish_event": AsyncMock(), "EVENTS": SimpleNamespace(FILE_UPLOADED="file.uploaded"),
+        }
+        upload = isolated_function(_SOURCE.parents[1] / "routers" / "files.py", "upload_file", namespace)
+        await upload(SimpleNamespace(), background_tasks=SimpleNamespace(), file=Mock(),
+                     metadata=None, process=True, process_in_background=True, user=Mock(), db=None)
+        self.assertFalse(handler.await_args.kwargs["process"])
+        files.update_file_data_by_id.assert_awaited_once_with("test-file", {"status": "completed"}, db=None)
+
+
+    async def test_actual_raw_file_delete_keeps_storage_cleanup_without_vector_runtime(self):
+        stored = SimpleNamespace(user_id='owner', path='/test/raw-file', filename='fixture.txt', hash=None)
+        storage = SimpleNamespace(delete_file=Mock())
+        vector = SimpleNamespace(delete=AsyncMock(side_effect=RuntimeError('must not enter embedding runtime')))
+        namespace = {
+            'router': SimpleNamespace(delete=lambda *args, **kwargs: lambda fn: fn),
+            'Depends': lambda *args, **kwargs: None,
+            'get_verified_user': Mock(), 'get_async_session': Mock(),
+            'HERMES_ONLY': True, 'asyncio': __import__('asyncio'),
+            'Files': SimpleNamespace(get_file_by_id=AsyncMock(return_value=stored), delete_file_by_id=AsyncMock(return_value=True)),
+            'Knowledges': SimpleNamespace(get_knowledges_by_file_id=AsyncMock(return_value=[])),
+            'Storage': storage, 'ASYNC_VECTOR_DB_CLIENT': vector,
+            'publish_event': AsyncMock(), 'EVENTS': SimpleNamespace(FILE_DELETED='file.deleted'),
+        }
+        delete = isolated_function(_SOURCE.parents[1] / 'routers' / 'files.py', 'delete_file_by_id', namespace)
+        result = await delete(SimpleNamespace(), 'fixture', user=SimpleNamespace(id='owner', role='user'), db=None)
+        self.assertEqual(result, {'message': 'File deleted successfully'})
+        storage.delete_file.assert_called_once_with('/test/raw-file')
+        vector.delete.assert_not_awaited()

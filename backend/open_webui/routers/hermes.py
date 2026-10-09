@@ -44,6 +44,7 @@ ALLOWED_METHODS = frozenset(
         "session.branch", "session.branch_stored", "session.branch_whole",
         "session.undo", "session.compress", "session.set_hidden",
         "prompt.submit", "prompt.background", "prompt.btw",
+        "image.attach_bytes", "pdf.attach", "file.attach",
         "clarify.lock", "approval.pending", "approval.received", "approval.respond",
     }
 )
@@ -419,3 +420,61 @@ async def websocket_proxy(websocket: WebSocket):
     finally:
         with contextlib.suppress(RuntimeError, WebSocketDisconnect):
             await websocket.close(code=1011 if accepted else 1013, reason="Hermes connection closed")
+
+
+@router.post("/ui-sessions/sync")
+async def sync_ui_sessions(user=Depends(_verified_http_user)):
+    """Copy only session metadata into the original sidebar; no agent is started."""
+    from uuid import uuid5, NAMESPACE_URL
+    from sqlalchemy import select, update
+    from open_webui.internal.db import get_async_db_context
+    from open_webui.models.chats import Chat, ChatForm, Chats
+
+    try:
+        async with _new_http_session() as session:
+            async with await _open_gateway(session, DashboardSettings.from_env()) as gateway:
+                await gateway.send_json({"jsonrpc": "2.0", "id": "ui-list", "method": "session.list", "params": {"limit": 200}})
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    message = await gateway.receive(timeout=max(0.1, deadline - time.monotonic()))
+                    if message.type != aiohttp.WSMsgType.TEXT:
+                        raise HermesUnavailable()
+                    frame = json.loads(message.data)
+                    if frame.get("id") == "ui-list":
+                        if frame.get("error"):
+                            raise HermesUnavailable()
+                        sessions = frame.get("result", {}).get("sessions", [])
+                        break
+                else:
+                    raise HermesUnavailable()
+    except (HermesUnavailable, aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        raise HTTPException(status_code=503, detail="Nie można odczytać listy rozmów Hermesa") from None
+
+    added = 0
+    async with get_async_db_context(None) as db:
+        payloads = (await db.execute(select(Chat.chat).where(Chat.user_id == user.id))).scalars().all()
+        mapped = {payload.get("hermes_session_id") for payload in payloads if isinstance(payload, dict)}
+        for row in sessions:
+            stored = row.get("id")
+            if not isinstance(stored, str) or not stored or stored in mapped:
+                continue
+            identifier = str(uuid5(NAMESPACE_URL, "owui-hermes:" + user.id + ":" + stored))
+            if await Chats.get_chat_by_id(identifier, db=db):
+                continue
+            title = row.get("title") or row.get("preview") or "Hermes"
+            form = ChatForm(chat={
+                "title": str(title)[:200], "models": ["hermes-agent"],
+                "history": {"messages": {}, "currentId": None}, "messages": [],
+                "hermes_session_id": stored,
+            })
+            item = await Chats.insert_new_chat(identifier, user.id, form, db=db)
+            if item:
+                started = row.get("started_at")
+                if isinstance(started, (int, float)) and started > 0:
+                    timestamp = int(started)
+                    await db.execute(update(Chat).where(Chat.id == identifier).values(
+                        created_at=timestamp, updated_at=timestamp, last_read_at=timestamp))
+                    await db.commit()
+                mapped.add(stored)
+                added += 1
+    return {"added": added, "limit": 200, "history_loading": "on_open"}
